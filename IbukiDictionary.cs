@@ -38,7 +38,7 @@ namespace ParallelDungeon.Rogue.Serialization
 
         private int m_Size;
         private int m_GrowthLeft;
-        private IEqualityComparer<TKey>? m_Comparer;
+        private readonly IEqualityComparer<TKey>? m_Comparer;
 
 
         private const byte Empty = 0x80;
@@ -172,7 +172,7 @@ namespace ParallelDungeon.Rogue.Serialization
             {
                 if (comparer == null)
                 {
-                    return EqualityComparer<TKey>.Default.GetHashCode(key);
+                    return key.GetHashCode();
                 }
                 else
                 {

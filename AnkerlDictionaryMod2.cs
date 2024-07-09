@@ -5,7 +5,10 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Runtime.CompilerServices;
+
+#pragma warning disable IDE0005
 using System.Runtime.InteropServices;
+#pragma warning restore
 
 namespace ParallelDungeon.Rogue.Serialization
 {
@@ -21,7 +24,7 @@ namespace ParallelDungeon.Rogue.Serialization
             where TKey : notnull
     {
 
-        private record struct Metadata(uint Fingerprint, int ValueIndex)
+        private readonly record struct Metadata(uint Fingerprint, int ValueIndex)
         {
             public override string ToString()
             {
@@ -35,9 +38,12 @@ namespace ParallelDungeon.Rogue.Serialization
         private int m_Size;
         private int m_Shifts = 32 - 2;
 
+        private readonly IEqualityComparer<TKey>? m_Comparer;
+
 
         private const int DistanceUnit = 0x100;
-        private const float MaxLoadFactor = 0.8f;
+        private const long MaxLoadFactorNum = 25;
+        private const long MaxLoadFactorDen = 32;
 
 
 
@@ -81,33 +87,74 @@ namespace ParallelDungeon.Rogue.Serialization
 #endif
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool AreEqual(TKey key1, TKey key2, IEqualityComparer<TKey>? comparer)
+        {
+            if (typeof(TKey).IsValueType)
+            {
+                if (comparer == null)
+                {
+                    return EqualityComparer<TKey>.Default.Equals(key1, key2);
+                }
+
+                return comparer.Equals(key1, key2);
+            }
+            else
+            {
+                return comparer!.Equals(key1, key2);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int GetHashCode(TKey key, IEqualityComparer<TKey>? comparer)
+        {
+            if (typeof(TKey).IsValueType)
+            {
+                if (comparer == null)
+                {
+                    return key.GetHashCode();
+                }
+
+                return comparer.GetHashCode(key);
+            }
+            else
+            {
+                return comparer!.GetHashCode(key);
+            }
+        }
+
+
         private int GetEntryIndex(TKey key)
         {
-            int hashCode = key.GetHashCode();
+            var metadata = m_Metadata;
+            var values = m_Values;
+            var comparer = m_Comparer;
+
+            int hashCode = GetHashCode(key, comparer);
             uint fingerprint = HashCodeToFingerprint(hashCode);
             int metadataIndex = HashCodeToMetadataIndex(hashCode, m_Shifts);
 
             //*
-            var metadata = At(m_Metadata, metadataIndex);
+            var current = At(metadata, metadataIndex);
 
 
             // unrolled loop #1
-            if (fingerprint == metadata.Fingerprint && EqualityComparer<TKey>.Default.Equals(At(m_Values, metadata.ValueIndex).Key, key))
+            if (fingerprint == current.Fingerprint && AreEqual(At(values, current.ValueIndex).Key, key, comparer))
             {
-                return metadata.ValueIndex;
+                return current.ValueIndex;
             }
             fingerprint += DistanceUnit;
             metadataIndex = IncrementMetadataIndex(metadataIndex);
-            metadata = At(m_Metadata, metadataIndex);
+            current = At(metadata, metadataIndex);
 
             // unrolled loop #2
-            if (fingerprint == metadata.Fingerprint && EqualityComparer<TKey>.Default.Equals(At(m_Values, metadata.ValueIndex).Key, key))
+            if (fingerprint == current.Fingerprint && AreEqual(At(values, current.ValueIndex).Key, key, comparer))
             {
-                return metadata.ValueIndex;
+                return current.ValueIndex;
             }
             fingerprint += DistanceUnit;
             metadataIndex = IncrementMetadataIndex(metadataIndex);
-            metadata = At(m_Metadata, metadataIndex);
+            //metadata = At(m_Metadata, metadataIndex);
             //*/
 
             return GetEntryIndexFallback(key, fingerprint, metadataIndex);
@@ -115,42 +162,52 @@ namespace ParallelDungeon.Rogue.Serialization
 
         private int GetEntryIndexFallback(TKey key, uint fingerprint, int metadataIndex)
         {
-            var metadata = At(m_Metadata, metadataIndex);
+            var metadata = m_Metadata;
+            var values = m_Values;
+            var comparer = m_Comparer;
+
+            var current = At(metadata, metadataIndex);
 
             while (true)
             {
-                if (fingerprint == metadata.Fingerprint)
+                if (fingerprint == current.Fingerprint)
                 {
-                    if (EqualityComparer<TKey>.Default.Equals(At(m_Values, metadata.ValueIndex).Key, key))
+                    if (AreEqual(At(values, current.ValueIndex).Key, key, comparer))
                     {
-                        return metadata.ValueIndex;
+                        return current.ValueIndex;
                     }
                 }
-                else if (fingerprint > metadata.Fingerprint)
+                else if (fingerprint > current.Fingerprint)
                 {
                     return -1;
                 }
 
                 fingerprint += DistanceUnit;
                 metadataIndex = IncrementMetadataIndex(metadataIndex);
-                metadata = At(m_Metadata, metadataIndex);
+                current = At(metadata, metadataIndex);
             }
         }
 
         private bool AddEntry(TKey key, TValue value, bool overwrite)
         {
-            int hashCode = key.GetHashCode();
+            var metadata = m_Metadata;
+            var values = m_Values;
+            var comparer = m_Comparer;
+
+            int hashCode = GetHashCode(key, comparer);
             uint fingerprint = HashCodeToFingerprint(hashCode);
             int metadataIndex = HashCodeToMetadataIndex(hashCode, m_Shifts);
 
-            while (fingerprint <= At(m_Metadata, metadataIndex).Fingerprint)
+
+            var current = At(metadata, metadataIndex);
+            while (fingerprint <= current.Fingerprint)
             {
-                if (fingerprint == At(m_Metadata, metadataIndex).Fingerprint &&
-                    EqualityComparer<TKey>.Default.Equals(key, At(m_Values, At(m_Metadata, metadataIndex).ValueIndex).Key))
+                if (fingerprint == current.Fingerprint &&
+                    AreEqual(key, At(values, current.ValueIndex).Key, comparer))
                 {
                     if (overwrite)
                     {
-                        At(m_Values, At(m_Metadata, metadataIndex).ValueIndex) = new KeyValuePair<TKey, TValue>(key, value);
+                        At(values, current.ValueIndex) = new KeyValuePair<TKey, TValue>(key, value);
                         return true;
                     }
                     else
@@ -161,16 +218,17 @@ namespace ParallelDungeon.Rogue.Serialization
 
                 fingerprint += DistanceUnit;
                 metadataIndex = IncrementMetadataIndex(metadataIndex);
+                current = At(metadata, metadataIndex);
             }
 
             //Console.WriteLine($"{hashCode:x8} {fingerprint:x8} {m_Size} {m_Shifts}");
 
             m_Size++;
-            At(m_Values, m_Size - 1) = new KeyValuePair<TKey, TValue>(key, value);
+            At(values, m_Size - 1) = new KeyValuePair<TKey, TValue>(key, value);
             PlaceAndShiftUp(new Metadata(fingerprint, m_Size - 1), metadataIndex);
 
 
-            if (m_Size >= m_Metadata.Length * MaxLoadFactor)
+            if (m_Size * MaxLoadFactorDen >= m_Metadata.Length * MaxLoadFactorNum)
             {
                 m_Shifts--;
                 int newCapacity = 1 << (32 - m_Shifts);
@@ -202,7 +260,7 @@ namespace ParallelDungeon.Rogue.Serialization
 
         private (uint fingerprint, int metadataIndex) NextWhileLess(TKey key)
         {
-            int hashCode = key.GetHashCode();
+            int hashCode = GetHashCode(key, m_Comparer);
             uint fingerprint = HashCodeToFingerprint(hashCode);
             int metadataIndex = HashCodeToMetadataIndex(hashCode, m_Shifts);
 
@@ -215,15 +273,17 @@ namespace ParallelDungeon.Rogue.Serialization
             return (fingerprint, metadataIndex);
         }
 
-        private void PlaceAndShiftUp(Metadata metadata, int metadataIndex)
+        private void PlaceAndShiftUp(Metadata current, int metadataIndex)
         {
-            while (At(m_Metadata, metadataIndex).Fingerprint != 0)
+            var metadata = m_Metadata;
+
+            while (At(metadata, metadataIndex).Fingerprint != 0)
             {
-                (metadata, At(m_Metadata, metadataIndex)) = (At(m_Metadata, metadataIndex), metadata);
-                metadata.Fingerprint += DistanceUnit;
+                (current, At(metadata, metadataIndex)) = (At(metadata, metadataIndex), current);
+                current = new Metadata(current.Fingerprint + DistanceUnit, current.ValueIndex);
                 metadataIndex = IncrementMetadataIndex(metadataIndex);
             }
-            At(m_Metadata, metadataIndex) = metadata;
+            At(metadata, metadataIndex) = current;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -234,16 +294,20 @@ namespace ParallelDungeon.Rogue.Serialization
 
         private bool RemoveEntry(TKey key)
         {
+            var metadata = m_Metadata;
+            var comparer = m_Comparer;
+
+
             (uint fingerprint, int metadataIndex) = NextWhileLess(key);
 
-            while (fingerprint == At(m_Metadata, metadataIndex).Fingerprint &&
-                !EqualityComparer<TKey>.Default.Equals(At(m_Values, At(m_Metadata, metadataIndex).ValueIndex).Key, key))
+            while (fingerprint == At(metadata, metadataIndex).Fingerprint &&
+                !AreEqual(At(m_Values, At(metadata, metadataIndex).ValueIndex).Key, key, comparer))
             {
                 fingerprint += DistanceUnit;
                 metadataIndex = IncrementMetadataIndex(metadataIndex);
             }
 
-            if (fingerprint != At(m_Metadata, metadataIndex).Fingerprint)
+            if (fingerprint != At(metadata, metadataIndex).Fingerprint)
             {
                 return false;
             }
@@ -254,31 +318,35 @@ namespace ParallelDungeon.Rogue.Serialization
 
         private void RemoveAt(int metadataIndex)
         {
-            int valueIndex = At(m_Metadata, metadataIndex).ValueIndex;
+            var metadata = m_Metadata;
+            var values = m_Values;
+
+
+            int valueIndex = At(metadata, metadataIndex).ValueIndex;
 
             int nextMetadataIndex = IncrementMetadataIndex(metadataIndex);
-            while (At(m_Metadata, nextMetadataIndex).Fingerprint >= DistanceUnit * 2)
+            while (At(metadata, nextMetadataIndex).Fingerprint >= DistanceUnit * 2)
             {
-                At(m_Metadata, metadataIndex) = new Metadata(At(m_Metadata, nextMetadataIndex).Fingerprint - DistanceUnit, At(m_Metadata, nextMetadataIndex).ValueIndex);
+                At(metadata, metadataIndex) = new Metadata(At(metadata, nextMetadataIndex).Fingerprint - DistanceUnit, At(metadata, nextMetadataIndex).ValueIndex);
                 (metadataIndex, nextMetadataIndex) = (nextMetadataIndex, IncrementMetadataIndex(nextMetadataIndex));
             }
 
-            At(m_Metadata, metadataIndex) = new Metadata();
+            At(metadata, metadataIndex) = new Metadata();
 
 
             if (valueIndex != m_Size - 1)
             {
-                At(m_Values, valueIndex) = At(m_Values, m_Size - 1);
+                At(values, valueIndex) = At(values, m_Size - 1);
 
-                int movingHashCode = At(m_Values, valueIndex).Key.GetHashCode();
+                int movingHashCode = At(values, valueIndex).Key.GetHashCode();
                 int movingMetadataIndex = HashCodeToMetadataIndex(movingHashCode, m_Shifts);
 
                 int valueIndexBack = m_Size - 1;
-                while (valueIndexBack != At(m_Metadata, movingMetadataIndex).ValueIndex)
+                while (valueIndexBack != At(metadata, movingMetadataIndex).ValueIndex)
                 {
                     movingMetadataIndex = IncrementMetadataIndex(movingMetadataIndex);
                 }
-                At(m_Metadata, movingMetadataIndex).ValueIndex = valueIndex;
+                At(m_Metadata, movingMetadataIndex) = new Metadata(At(metadata, movingMetadataIndex).Fingerprint, valueIndex);
             }
 
             m_Size--;
@@ -295,8 +363,14 @@ namespace ParallelDungeon.Rogue.Serialization
 
 
 
-        public AnkerlDictionaryMod2() : this(4) { }
-        public AnkerlDictionaryMod2(int capacity)
+
+        public AnkerlDictionaryMod2() : this(typeof(TKey).IsValueType ? null : EqualityComparer<TKey>.Default) { }
+        public AnkerlDictionaryMod2(int capacity) : this(capacity, typeof(TKey).IsValueType ? null : EqualityComparer<TKey>.Default) { }
+        public AnkerlDictionaryMod2(IDictionary<TKey, TValue> dictionary) : this(dictionary, typeof(TKey).IsValueType ? null : EqualityComparer<TKey>.Default) { }
+        public AnkerlDictionaryMod2(IEnumerable<KeyValuePair<TKey, TValue>> source) : this(source.Count(), typeof(TKey).IsValueType ? null : EqualityComparer<TKey>.Default) { }
+
+        public AnkerlDictionaryMod2(IEqualityComparer<TKey>? comparer) : this(4, comparer) { }
+        public AnkerlDictionaryMod2(int capacity, IEqualityComparer<TKey>? comparer)
         {
             if (capacity < 0)
                 throw new ArgumentOutOfRangeException(nameof(capacity));
@@ -309,11 +383,14 @@ namespace ParallelDungeon.Rogue.Serialization
 
             m_Size = 0;
             m_Shifts = 32 - TrailingZeroCount((ulong)capacity);
+
+            m_Comparer = comparer;
         }
 
-        public AnkerlDictionaryMod2(IDictionary<TKey, TValue> dictionary)
+        public AnkerlDictionaryMod2(IDictionary<TKey, TValue> dictionary, IEqualityComparer<TKey>? comparer)
         {
-            if (dictionary is AnkerlDictionaryMod2<TKey, TValue> cloneSource)
+            if (dictionary is AnkerlDictionaryMod2<TKey, TValue> cloneSource &&
+                cloneSource.m_Comparer == comparer)
             {
                 m_Values = ArrayPool<KeyValuePair<TKey, TValue>>.Shared.Rent(cloneSource.m_Values.Length);
                 m_Metadata = ArrayPool<Metadata>.Shared.Rent(cloneSource.m_Metadata.Length);
@@ -322,6 +399,8 @@ namespace ParallelDungeon.Rogue.Serialization
 
                 m_Size = cloneSource.m_Size;
                 m_Shifts = cloneSource.m_Shifts;
+
+                m_Comparer = comparer;
                 return;
             }
 
@@ -334,12 +413,14 @@ namespace ParallelDungeon.Rogue.Serialization
             m_Size = 0;
             m_Shifts = 32 - TrailingZeroCount((ulong)capacity);
 
+            m_Comparer = comparer;
+
             foreach (var pair in dictionary)
             {
                 AddEntry(pair.Key, pair.Value, false);
             }
         }
-        public AnkerlDictionaryMod2(IEnumerable<KeyValuePair<TKey, TValue>> source) : this(source.Count())
+        public AnkerlDictionaryMod2(IEnumerable<KeyValuePair<TKey, TValue>> source, IEqualityComparer<TKey>? comparer) : this(source.Count(), comparer)
         {
             foreach (var pair in source)
             {

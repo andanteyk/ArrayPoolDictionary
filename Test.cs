@@ -7,7 +7,7 @@ public class Test
 {
     public static void RunTest()
     {
-        var dic = new IbukiDictionary<Guid, Guid>();
+        var dic = new AnkerlDictionaryMod2<Guid, Guid>();
 
         var addedKeys = new List<Guid>();
 
